@@ -1,0 +1,144 @@
+Assignment 1
+# Assignment 1
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os
+from glob import glob
+import shutil
+from osgeo import gdal
+
+zip_path = r"/content/drive/MyDrive/MOISES_GEOG6855_Lab_1/LC08_L1TP_038031_20200815_20200920_02_T1.zip"
+
+unzip_root = "/content/content/drive/MyDrive/MOISES_GEOG6855_Lab_1/unzipped_scene"
+if os.path.exists(unzip_root):
+    shutil.rmtree(unzip_root)
+os.makedirs(unzip_root, exist_ok=True)
+
+# Unzip (quiet)
+!unzip -q "{zip_path}" -d "{unzip_root}"
+
+# scene folder that contains the band TIFs
+scene_dir = None
+for root, dirs, files in os.walk(unzip_root):
+    if any(f.endswith("_B1.TIF") or f.endswith("_B1.tif") for f in files):
+        scene_dir = root
+        break
+
+if scene_dir is None:
+    raise FileNotFoundError("Could not find the scene folder containing *_B1.TIF. Check the zip content.")
+
+print("Scene directory:", scene_dir)
+
+out_root = r"/content/drive/MyDrive/MOISES_GEOG6855_Lab_1/Lab1_Assignment1"
+separate_bands_dir = os.path.join(out_root, "Separate_bands")
+if not os.path.exists(separate_bands_dir):
+    os.makedirs(separate_bands_dir)
+
+# stack
+bands_to_stack = ["B1","B2","B3","B4","B5","B6","B7","B9"]
+
+# file list
+band_files = []
+for b in bands_to_stack:
+    matches = glob(os.path.join(scene_dir, f"*_{b}.TIF")) + glob(os.path.join(scene_dir, f"*_{b}.tif"))
+    if len(matches) != 1:
+        raise FileNotFoundError(f"Expected exactly 1 file for {b}, found {len(matches)}: {matches}")
+    band_files.append(matches[0])
+
+print("Band files to stack:")
+for f in band_files:
+    print(" -", f)
+
+# dimensions and geospatial information
+first_band = gdal.Open(band_files[0])
+if first_band is None:
+    raise FileNotFoundError("GDAL could not open the first band file. Check file paths / unzip results.")
+
+x_size = first_band.RasterXSize
+y_size = first_band.RasterYSize
+projection = first_band.GetProjection()
+geotransform = first_band.GetGeoTransform()
+data_type = first_band.GetRasterBand(1).DataType
+no_data_value = first_band.GetRasterBand(1).GetNoDataValue()
+
+print(f"x_size: {x_size}, y_size: {y_size}")
+print("projection (first band):", projection[:80], "..." if len(projection) > 80 else "")
+print("geotransform:", geotransform)
+print("data_type:", data_type, "no_data_value:", no_data_value)
+
+stacked_path = os.path.join(separate_bands_dir, "Landsat8_stacked.tif")
+
+# output file
+driver = gdal.GetDriverByName("GTiff")
+output_dataset = driver.Create(stacked_path, x_size, y_size, len(band_files), data_type)
+
+output_dataset.SetProjection(projection)
+output_dataset.SetGeoTransform(geotransform)
+
+# loop
+for i, f in enumerate(band_files, start=1):  # GDAL bands start at 1
+    src = gdal.Open(f)
+    band_data = src.GetRasterBand(1).ReadAsArray()
+    output_dataset.GetRasterBand(i).WriteArray(band_data)
+    output_dataset.GetRasterBand(i).SetNoDataValue(no_data_value)
+
+output_dataset.FlushCache()
+output_dataset = None
+
+print(f"✅ Stacked image saved as: {stacked_path}")
+
+# save ALL 30m bands into same-name folders
+# all in the scene folder
+tif_list = glob(os.path.join(scene_dir, "*.TIF")) + glob(os.path.join(scene_dir, "*.tif"))
+print("Total tif files found in scene folder:", len(tif_list))
+
+# gdal transform
+def is_30m_band(tif_path, tol=0.01):
+    ds = gdal.Open(tif_path)
+    if ds is None:
+        return False
+    gt = ds.GetGeoTransform()
+    # pixel size (x) = gt[1], pixel size (y) = abs(gt[5])
+    px_x = abs(gt[1])
+    px_y = abs(gt[5])
+    return (abs(px_x - 30) < tol) and (abs(px_y - 30) < tol)
+
+# Filter to 30m only
+tif_30m_list = []
+for tif in tif_list:
+    if is_30m_band(tif):
+        tif_30m_list.append(tif)
+
+print("30m tif files found:", len(tif_30m_list))
+for f in tif_30m_list[:10]:
+    print(" -", os.path.basename(f))
+if len(tif_30m_list) > 10:
+    print(" ...")
+
+# Copy each 30m file into a folder with the same name as the file
+for img in tif_30m_list:
+
+    img_name_list = img.split(os.sep)
+    img_name = img_name_list[-1]
+    img_folder_name = img_name.split(".")[0]
+
+    new_folder = os.path.join(separate_bands_dir, img_folder_name)
+    if not os.path.exists(new_folder):
+        os.makedirs(new_folder)
+
+    # Save/copy
+    dest_path = os.path.join(new_folder, img_name)
+    shutil.copy2(img, dest_path)
+
+print(f"✅ 30m bands saved into per-band folders under: {separate_bands_dir}")
+
+# Last check
+print("\nContents of Separate_bands:")
+for item in sorted(os.listdir(separate_bands_dir))[:30]:
+    print(" -", item)
+if len(os.listdir(separate_bands_dir)) > 30:
+    print(" ...")
+
+
